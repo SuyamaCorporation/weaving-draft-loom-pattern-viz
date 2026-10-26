@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>機織り ドラフト パターン ビジュアライザー</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen p-4">
+<div class="max-w-5xl mx-auto">
+  <h1 class="text-2xl font-bold text-center text-indigo-800 mb-2">機織り ドラフト パターン ビジュアライザー</h1>
+  <p class="text-center text-gray-500 text-sm mb-6">シャフト数・タイアップ・シーケンスを設定して織り組織図を生成</p>
+
+  <!-- Controls -->
+  <div class="bg-white rounded-xl shadow p-4 mb-6">
+    <div class="flex flex-wrap gap-4 items-center mb-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">シャフト数</label>
+        <select id="shaftCount" class="border rounded px-3 py-1 text-sm">
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4" selected>4</option>
+          <option value="5">5</option>
+          <option value="6">6</option>
+          <option value="8">8</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">プリセット</label>
+        <select id="preset" class="border rounded px-3 py-1 text-sm">
+          <option value="custom">カスタム</option>
+          <option value="plain">平織 (Plain weave)</option>
+          <option value="twill3">三枚綾 (Twill 3)</option>
+          <option value="twill4">四枚綾 (Twill 4)</option>
+          <option value="satin5">五枚朱子 (Satin 5)</option>
+          <option value="satin8">八枚朱子 (Satin 8)</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">緯糸本数</label>
+        <input type="number" id="weftCount" value="8" min="2" max="32" class="border rounded px-3 py-1 text-sm w-20">
+      </div>
+      <button id="renderBtn" class="bg-indigo-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-indigo-700" aria-label="描画">描画する</button>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- Threading (経糸シーケンス) -->
+    <div class="bg-white rounded-xl shadow p-4">
+      <h2 class="font-semibold text-gray-800 mb-3">経糸スレッディング（Threading）</h2>
+      <p class="text-xs text-gray-500 mb-2">各経糸がどのシャフトに通るか（クリックで切替）</p>
+      <div id="threadingGrid" class="overflow-auto"></div>
+    </div>
+
+    <!-- Tieup -->
+    <div class="bg-white rounded-xl shadow p-4">
+      <h2 class="font-semibold text-gray-800 mb-3">タイアップ（Tie-up）</h2>
+      <p class="text-xs text-gray-500 mb-2">シャフト × タイアップポジション（クリックで切替）</p>
+      <div id="tieupGrid" class="overflow-auto"></div>
+    </div>
+
+    <!-- Treadling (緯糸シーケンス) -->
+    <div class="bg-white rounded-xl shadow p-4">
+      <h2 class="font-semibold text-gray-800 mb-3">トレッドリング（Treadling）</h2>
+      <p class="text-xs text-gray-500 mb-2">各緯糸のペダル踏み順（クリックで切替）</p>
+      <div id="treadlingGrid" class="overflow-auto"></div>
+    </div>
+
+    <!-- Drawdown -->
+    <div class="bg-white rounded-xl shadow p-4">
+      <h2 class="font-semibold text-gray-800 mb-3">ドローダウン（Drawdown）</h2>
+      <p class="text-xs text-gray-500 mb-2">黒=経糸が上（経糸浮き）</p>
+      <canvas id="drawdownCanvas" class="border border-gray-300"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+const CELL = 20;
+
+let shafts = 4;
+let treadles = 4;
+let wefts = 8;
+let warps = 16;
+
+// State matrices
+let threading = []; // threading[warp] = shaft (0-indexed)
+let tieup = [];     // tieup[shaft][treadle] = bool
+let treadling = []; // treadling[weft] = treadle (0-indexed)
+
+function initState() {
+  shafts = parseInt(document.getElementById('shaftCount').value);
+  treadles = shafts;
+  wefts = parseInt(document.getElementById('weftCount').value);
+  warps = wefts * 2;
+
+  threading = Array(warps).fill(0).map((_, i) => i % shafts);
+  tieup = Array(shafts).fill(null).map(() => Array(treadles).fill(false));
+  treadling = Array(wefts).fill(0).map((_, i) => i % treadles);
+
+  // Default: diagonal tieup
+  for (let s = 0; s < shafts; s++) {
+    tieup[s][s] = true;
+  }
+}
+
+function applyPreset(name) {
+  const s = shafts;
+  tieup = Array(s).fill(null).map(() => Array(treadles).fill(false));
+  threading = Array(warps).fill(0).map((_, i) => i % s);
+  treadling = Array(wefts).fill(0).map((_, i) => i % treadles);
+
+  if (name === 'plain') {
+    // 平織: shaft0-shaft1 alternating
+    for (let i = 0; i < warps; i++) threading[i] = i % 2;
+    for (let i = 0; i < wefts; i++) treadling[i] = i % 2;
+    treadles = 2;
+    tieup = [[true, false], [false, true]];
+  } else if (name === 'twill3') {
+    for (let i = 0; i < warps; i++) threading[i] = i % 3;
+    for (let i = 0; i < wefts; i++) treadling[i] = i % 3;
+    treadles = 3;
+    tieup = [[true,false,false],[true,true,false],[false,true,true]];
+  } else if (name === 'twill4') {
+    for (let i = 0; i < warps; i++) threading[i] = i % 4;
+    for (let i = 0; i < wefts; i++) treadling[i] = i % 4;
+    treadles = 4;
+    tieup = [[true,false,false,false],[true,true,false,false],[false,true,true,false],[false,false,true,true]];
+  } else if (name === 'satin5') {
+    const n = Math.min(s, 5);
+    treadles = n;
+    for (let i = 0; i < warps; i++) threading[i] = i % n;
+    for (let i = 0; i < wefts; i++) treadling[i] = i % n;
+    tieup = Array(n).fill(null).map(() => Array(n).fill(false));
+    const moves = [0,3,1,4,2];
+    for (let i = 0; i < n; i++) tieup[i][(i + moves[i % moves.length]) % n] = true;
+  } else if (name === 'satin8') {
+    const n = Math.min(s, 8);
+    treadles = n;
+    for (let i = 0; i < warps; i++) threading[i] = i % n;
+    for (let i = 0; i < wefts; i++) treadling[i] = i % n;
+    tieup = Array(n).fill(null).map(() => Array(n).fill(false));
+    const moves = [0,3,6,1,4,7,2,5];
+    for (let i = 0; i < n; i++) tieup[i][(i + moves[i % moves.length]) % n] = true;
+  } else {
+    // diagonal
+    for (let i = 0; i < s; i++) tieup[i][i] = true;
+  }
+}
+
+function makeGrid(rows, cols, getVal, setVal, labelRows, labelCols) {
+  const table = document.createElement('table');
+  table.className = 'border-collapse text-xs';
+  // header row
+  if (labelCols) {
+    const tr = document.createElement('tr');
+    const th0 = document.createElement('th');
+    tr.appendChild(th0);
+    for (let c = 0; c < cols; c++) {
+      const th = document.createElement('th');
+      th.textContent = labelCols(c);
+      th.className = 'w-6 h-6 text-center text-gray-400';
+      tr.appendChild(th);
+    }
+    table.appendChild(tr);
+  }
+  for (let r = 0; r < rows; r++) {
+    const tr = document.createElement('tr');
+    if (labelRows) {
+      const td = document.createElement('td');
+      td.textContent = labelRows(r);
+      td.className = 'pr-1 text-gray-400 text-right';
+      tr.appendChild(td);
+    }
+    for (let c = 0; c < cols; c++) {
+      const td = document.createElement('td');
+      td.style.width = CELL + 'px';
+      td.style.height = CELL + 'px';
+      td.style.border = '1px solid #d1d5db';
+      td.style.cursor = 'pointer';
+      td.style.backgroundColor = getVal(r, c) ? '#4f46e5' : '#f9fafb';
+      td.dataset.r = r;
+      td.dataset.c = c;
+      td.addEventListener('click', () => {
+        setVal(r, c);
+        td.style.backgroundColor = getVal(r, c) ? '#4f46e5' : '#f9fafb';
+        renderDrawdown();
+      });
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
+  return table;
+}
+
+function renderThreading() {
+  const container = document.getElementById('threadingGrid');
+  container.innerHTML = '';
+  // rows = shafts (top=shaft0), cols = warps
+  const grid = makeGrid(shafts, warps,
+    (r, c) => threading[c] === r,
+    (r, c) => {
+      threading[c] = (threading[c] === r) ? -1 : r;
+    },
+    r => `S${r+1}`,
+    c => (c % 4 === 0) ? String(c+1) : ''
+  );
+  container.appendChild(grid);
+}
+
+function renderTieup() {
+  const container = document.getElementById('tieupGrid');
+  container.innerHTML = '';
+  const grid = makeGrid(shafts, treadles,
+    (r, c) => tieup[r] && tieup[r][c],
+    (r, c) => {
+      if (!tieup[r]) tieup[r] = [];
+      tieup[r][c] = !tieup[r][c];
+    },
+    r => `S${r+1}`,
+    c => `T${c+1}`
+  );
+  container.appendChild(grid);
+}
+
+function renderTreadling() {
+  const container = document.getElementById('treadlingGrid');
+  container.innerHTML = '';
+  const grid = makeGrid(wefts, treadles,
+    (r, c) => treadling[r] === c,
+    (r, c) => {
+      treadling[r] = (treadling[r] === c) ? -1 : c;
+    },
+    r => String(r+1),
+    c => `T${c+1}`
+  );
+  container.appendChild(grid);
+}
+
+function renderDrawdown() {
+  const canvas = document.getElementById('drawdownCanvas');
+  canvas.width = warps * CELL;
+  canvas.height = wefts * CELL;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  for (let weft = 0; weft < wefts; weft++) {
+    const treadle = treadling[weft];
+    for (let warp = 0; warp < warps; warp++) {
+      const shaft = threading[warp];
+      let warpUp = false;
+      if (shaft >= 0 && treadle >= 0 && tieup[shaft] && tieup[shaft][treadle]) {
+        warpUp = true;
+      }
+      const x = warp * CELL;
+      const y = weft * CELL;
+      ctx.fillStyle = warpUp ? '#4f46e5' : '#f9fafb';
+      ctx.fillRect(x, y, CELL, CELL);
+      ctx.strokeStyle = '#d1d5db';
+      ctx.strokeRect(x, y, CELL, CELL);
+    }
+  }
+}
+
+function render() {
+  renderThreading();
+  renderTieup();
+  renderTreadling();
+  renderDrawdown();
+}
+
+document.getElementById('renderBtn').addEventListener('click', () => {
+  initState();
+  const preset = document.getElementById('preset').value;
+  if (preset !== 'custom') applyPreset(preset);
+  render();
+});
+
+document.getElementById('shaftCount').addEventListener('change', () => {
+  document.getElementById('preset').value = 'custom';
+});
+
+document.getElementById('preset').addEventListener('change', () => {
+  initState();
+  const preset = document.getElementById('preset').value;
+  if (preset !== 'custom') applyPreset(preset);
+  render();
+});
+
+// Init
+initState();
+render();
+</script>
+</body>
+</html>
